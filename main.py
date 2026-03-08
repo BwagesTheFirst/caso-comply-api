@@ -97,6 +97,7 @@ async def root():
             "GET  /health",
             "POST /api/analyze",
             "POST /api/remediate",
+            "POST /api/verify/{file_id}",
             "GET  /api/download/{file_id}",
         ],
     }
@@ -172,6 +173,53 @@ async def remediate(
     }
 
     # Include Gemini verification details when available
+    if "verification" in result:
+        response["verification"] = result["verification"]
+
+    return response
+
+
+@app.post("/api/verify/{file_id}")
+async def verify(file_id: str):
+    """
+    Run Gemini AI verification on a previously remediated PDF.
+
+    This is a premium feature -- the frontend calls it separately
+    after the initial (unverified) remediation is complete.
+    """
+    if not file_id.isalnum() or len(file_id) > 24:
+        raise HTTPException(status_code=400, detail="Invalid file ID")
+
+    # Find the original uploaded file
+    upload_matches = list(UPLOAD_DIR.glob(f"{file_id}_*"))
+    if not upload_matches:
+        raise HTTPException(status_code=404, detail="Original upload not found")
+
+    upload_path = upload_matches[0]
+
+    # Find the remediated file
+    output_path = OUTPUT_DIR / f"{file_id}_remediated.pdf"
+    if not output_path.exists():
+        raise HTTPException(status_code=404, detail="Remediated file not found -- run remediation first")
+
+    try:
+        result = await remediate_pdf_async(str(upload_path), str(output_path), verify=True)
+    except Exception as exc:
+        logger.exception("Verification failed for %s", upload_path.name)
+        raise HTTPException(status_code=500, detail=f"Verification failed: {exc}") from exc
+
+    response = {
+        "file_id": file_id,
+        "blocks_tagged": result["blocks_tagged"],
+        "tag_summary": result.get("tag_summary", {}),
+        "tag_assignments": result["tag_assignments"],
+        "page_dimensions": result.get("page_dimensions", []),
+        "after": {
+            "score": result["after"]["score"],
+            "structure": result["after"]["structure"],
+        },
+    }
+
     if "verification" in result:
         response["verification"] = result["verification"]
 
