@@ -9,6 +9,7 @@ and writes a proper tagged PDF structure using pikepdf.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import defaultdict
 from pathlib import Path
@@ -17,6 +18,8 @@ import fitz  # PyMuPDF
 import pdfplumber
 import pikepdf
 from pikepdf import Array, Dictionary, Name, String
+
+from gemini_verify import verify_and_correct
 
 logger = logging.getLogger(__name__)
 
@@ -560,11 +563,16 @@ def _is_operator_boundary(raw: bytes, pos: int, op_len: int) -> bool:
 # 4. Public remediation entry point
 # ---------------------------------------------------------------------------
 
-def remediate_pdf(file_path: str, output_path: str | None = None) -> dict:
+async def remediate_pdf_async(
+    file_path: str,
+    output_path: str | None = None,
+    verify: bool = True,
+) -> dict:
     """
-    Full remediation pipeline:
+    Full remediation pipeline (async, supports Gemini verification):
       1. Analyze the input PDF (before state).
       2. Extract content and auto-classify blocks by font size.
+      2b. (Optional) Verify and correct via Gemini AI.
       3. Write tags, metadata, and marked content operators.
       4. Analyze the output PDF (after state).
       5. Return before/after comparison and output path.
@@ -590,6 +598,49 @@ def remediate_pdf(file_path: str, output_path: str | None = None) -> dict:
             "output_path": file_path,
             "blocks_tagged": 0,
         }
+
+    # ── Gemini AI verification step ──────────────────────────────────
+    verification_info: dict | None = None
+    if verify:
+        logger.info("Running Gemini AI verification on %d tags", len(tag_assignments))
+        verification_result = await verify_and_correct(
+            pdf_path=file_path,
+            tag_assignments=tag_assignments,
+            content=content,
+        )
+        verification_info = {
+            "issues_found": verification_result["issues_found"],
+            "verification_score": verification_result["verification_score"],
+            "alt_texts": verification_result["alt_texts"],
+        }
+
+        corrected = verification_result["corrected_tags"]
+        if corrected:
+            # Log changes
+            original_types = {(t["page"], t["mcid"]): t["type"] for t in tag_assignments}
+            changes = 0
+            for ct in corrected:
+                key = (ct["page"], ct["mcid"])
+                old_type = original_types.get(key)
+                if old_type and old_type != ct["type"]:
+                    logger.info(
+                        "Gemini corrected page %d mcid %d: %s -> %s (%s)",
+                        ct["page"], ct["mcid"], old_type, ct["type"],
+                        ct.get("reason", ""),
+                    )
+                    changes += 1
+            logger.info("Gemini made %d tag corrections", changes)
+
+            # Filter out artifacts
+            tag_assignments = [
+                t for t in corrected if not t.get("is_artifact", False)
+            ]
+
+            # Re-assign MCIDs sequentially per page after filtering
+            mcid_counters: dict[int, int] = defaultdict(int)
+            for t in tag_assignments:
+                t["mcid"] = mcid_counters[t["page"]]
+                mcid_counters[t["page"]] += 1
 
     # Derive title from first H1
     title = "Untitled Document"
@@ -633,7 +684,7 @@ def remediate_pdf(file_path: str, output_path: str | None = None) -> dict:
         for p in content["pages"]
     ]
 
-    return {
+    result = {
         "before": before_analysis,
         "after": after_analysis,
         "tag_assignments": [
@@ -652,3 +703,39 @@ def remediate_pdf(file_path: str, output_path: str | None = None) -> dict:
         "output_path": output_path,
         "blocks_tagged": len(tag_assignments),
     }
+
+    if verification_info is not None:
+        result["verification"] = verification_info
+
+    return result
+
+
+def remediate_pdf(
+    file_path: str,
+    output_path: str | None = None,
+    verify: bool = True,
+) -> dict:
+    """
+    Sync wrapper around remediate_pdf_async.
+
+    If an event loop is already running (e.g. inside FastAPI) callers should
+    use ``remediate_pdf_async`` directly.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        # We're already inside an async context -- should not happen if
+        # callers use the async variant, but handle it gracefully.
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            return pool.submit(
+                asyncio.run,
+                remediate_pdf_async(file_path, output_path, verify),
+            ).result()
+    else:
+        return asyncio.run(
+            remediate_pdf_async(file_path, output_path, verify)
+        )

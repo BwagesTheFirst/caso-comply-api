@@ -18,7 +18,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY main.py remediation.py ./
+COPY main.py remediation.py gemini_verify.py ./
 
 # Create working directories for uploads and output
 RUN mkdir -p /app/uploads /app/output

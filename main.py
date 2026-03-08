@@ -12,11 +12,11 @@ import shutil
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from remediation import analyze_pdf, remediate_pdf
+from remediation import analyze_pdf, remediate_pdf_async
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -132,10 +132,15 @@ async def analyze(file: UploadFile = File(...)):
 
 
 @app.post("/api/remediate")
-async def remediate(file: UploadFile = File(...)):
+async def remediate(
+    file: UploadFile = File(...),
+    verify: bool = Query(True, description="Run Gemini AI verification on tag assignments"),
+):
     """
     Upload a PDF, remediate it, and receive before/after comparison
     plus a download URL for the remediated file.
+
+    Set ?verify=false to skip the Gemini AI verification step.
     """
     file_id, path = _save_upload(file)
 
@@ -143,12 +148,12 @@ async def remediate(file: UploadFile = File(...)):
     output_path = OUTPUT_DIR / output_name
 
     try:
-        result = remediate_pdf(str(path), str(output_path))
+        result = await remediate_pdf_async(str(path), str(output_path), verify=verify)
     except Exception as exc:
         logger.exception("Remediation failed for %s", path.name)
         raise HTTPException(status_code=500, detail=f"Remediation failed: {exc}") from exc
 
-    return {
+    response = {
         "file_id": file_id,
         "filename": file.filename,
         "download_url": f"/api/download/{file_id}",
@@ -163,7 +168,14 @@ async def remediate(file: UploadFile = File(...)):
             "structure": result["after"]["structure"],
         },
         "tag_assignments": result["tag_assignments"],
+        "page_dimensions": result.get("page_dimensions", []),
     }
+
+    # Include Gemini verification details when available
+    if "verification" in result:
+        response["verification"] = result["verification"]
+
+    return response
 
 
 @app.get("/api/download/{file_id}")
