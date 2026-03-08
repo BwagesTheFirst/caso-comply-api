@@ -23,6 +23,7 @@ COPY main.py remediation.py ./
 # Create working directories for uploads and output
 RUN mkdir -p /app/uploads /app/output
 
-EXPOSE 8787
+ENV PORT=10000
+EXPOSE 10000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8787"]
+CMD uvicorn main:app --host 0.0.0.0 --port ${PORT}
