@@ -1,0 +1,17 @@
+# Render.com Blueprint — CASO Comply API Service
+# https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: caso-comply-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    repo: https://github.com/YOUR_ORG/caso-comply-api  # Update after pushing
+    branch: main
+    plan: starter
+    region: oregon
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: "8787"
