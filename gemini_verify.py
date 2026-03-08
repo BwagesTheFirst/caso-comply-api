@@ -218,7 +218,6 @@ async def _call_gemini(
         system_instruction=SYSTEM_PROMPT,
         response_mime_type="application/json",
         response_schema=RESPONSE_SCHEMA,
-        tools=[types.Tool(google_search=types.GoogleSearch())],
     )
 
     logger.info("Sending request to Gemini %s", MODEL_ID)
