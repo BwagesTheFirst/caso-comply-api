@@ -627,6 +627,12 @@ def remediate_pdf(file_path: str, output_path: str | None = None) -> dict:
     for tag in tag_assignments:
         tag_summary[tag["type"]] += 1
 
+    # Collect page dimensions for frontend coordinate mapping
+    page_dimensions = [
+        {"page": p["page"], "width": p["width"], "height": p["height"]}
+        for p in content["pages"]
+    ]
+
     return {
         "before": before_analysis,
         "after": after_analysis,
@@ -637,9 +643,11 @@ def remediate_pdf(file_path: str, output_path: str | None = None) -> dict:
                 "mcid": t["mcid"],
                 "text": t["text"][:120],
                 "font_size": t["font_size"],
+                "bbox": t["bbox"],
             }
             for t in tag_assignments
         ],
+        "page_dimensions": page_dimensions,
         "tag_summary": dict(tag_summary),
         "output_path": output_path,
         "blocks_tagged": len(tag_assignments),
