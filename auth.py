@@ -241,7 +241,7 @@ def enforce_tenant_access(tenant_id: str, required_scope: str | None = None) -> 
         result = (
             sb.table("tenants")
             .select(
-                "id, org_name, status, trial_ends_at, plan_id, "
+                "id, name, status, trial_ends_at, plan_id, "
                 "subscription_plans(id, name, pages_included, features, overage_rate_cents)"
             )
             .eq("id", tenant_id)
@@ -363,7 +363,7 @@ def enforce_tenant_access(tenant_id: str, required_scope: str | None = None) -> 
 
     return {
         "tenant_id": tenant_id,
-        "org_name": tenant.get("org_name", ""),
+        "org_name": tenant.get("name", ""),
         "status": status,
         "plan_name": plan.get("name", "Unknown"),
         "plan_id": plan.get("id"),
