@@ -127,7 +127,7 @@ def update_last_used(api_key_id: str) -> None:
 
 def record_usage(
     tenant_id: str,
-    api_key_id: str,
+    api_key_id: str | None,
     action: str,
     pages: int,
     filename: str | None = None,
@@ -138,7 +138,7 @@ def record_usage(
 
     Args:
         tenant_id:  UUID of the tenant / organization.
-        api_key_id: UUID of the API key used.
+        api_key_id: UUID of the API key used (None for demo/anonymous).
         action:     "analyze" or "remediate".
         pages:      Number of pages processed.
         filename:   Original filename (optional).
@@ -154,7 +154,6 @@ def record_usage(
     # Insert the usage record
     record = {
         "tenant_id": tenant_id,
-        "api_key_id": api_key_id,
         "action": action,
         "pages": pages,
         "filename": filename,
@@ -162,6 +161,8 @@ def record_usage(
         "billing_period_start": billing_period_start.isoformat(),
         "created_at": now.isoformat(),
     }
+    if api_key_id is not None:
+        record["api_key_id"] = api_key_id
 
     try:
         sb.table("usage_records").insert(record).execute()

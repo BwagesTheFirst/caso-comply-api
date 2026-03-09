@@ -313,17 +313,22 @@ async def analyze(
         "tables": result["tables"],
     }
 
-    # Track usage & build response headers when authenticated
+    # Track usage -- always record, even for anonymous/demo requests
+    DEMO_TENANT_ID = "00000000-0000-0000-0000-000000000000"
+    tenant_id = auth_ctx["tenant_id"] if auth_ctx else DEMO_TENANT_ID
+    api_key_id = auth_ctx["api_key_id"] if auth_ctx else None
+
+    usage = record_usage(
+        tenant_id=tenant_id,
+        api_key_id=api_key_id,
+        action="analyze",
+        pages=page_count,
+        filename=original_filename,
+        doc_format=original_ext.lstrip("."),
+    )
+
     headers: dict[str, str] = {}
     if auth_ctx:
-        usage = record_usage(
-            tenant_id=auth_ctx["tenant_id"],
-            api_key_id=auth_ctx["api_key_id"],
-            action="analyze",
-            pages=page_count,
-            filename=original_filename,
-            doc_format=original_ext.lstrip("."),
-        )
         update_last_used(auth_ctx["api_key_id"])
         headers["X-CASO-Pages-Used"] = str(usage["pages_used"])
         headers["X-CASO-Pages-Remaining"] = str(
@@ -407,17 +412,22 @@ async def remediate(
     if "verification" in result:
         body["verification"] = result["verification"]
 
-    # Track usage & build response headers when authenticated
+    # Track usage -- always record, even for anonymous/demo requests
+    DEMO_TENANT_ID = "00000000-0000-0000-0000-000000000000"
+    tenant_id = auth_ctx["tenant_id"] if auth_ctx else DEMO_TENANT_ID
+    api_key_id = auth_ctx["api_key_id"] if auth_ctx else None
+
+    usage = record_usage(
+        tenant_id=tenant_id,
+        api_key_id=api_key_id,
+        action="remediate",
+        pages=page_count,
+        filename=original_filename,
+        doc_format=original_ext.lstrip("."),
+    )
+
     headers: dict[str, str] = {}
     if auth_ctx:
-        usage = record_usage(
-            tenant_id=auth_ctx["tenant_id"],
-            api_key_id=auth_ctx["api_key_id"],
-            action="remediate",
-            pages=page_count,
-            filename=original_filename,
-            doc_format=original_ext.lstrip("."),
-        )
         update_last_used(auth_ctx["api_key_id"])
         headers["X-CASO-Pages-Used"] = str(usage["pages_used"])
         headers["X-CASO-Pages-Remaining"] = str(
