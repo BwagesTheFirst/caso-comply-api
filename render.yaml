@@ -9,7 +9,7 @@ services:
     dockerContext: .
     repo: https://github.com/YOUR_ORG/caso-comply-api  # Update after pushing
     branch: main
-    plan: starter
+    plan: standard
     region: oregon
     healthCheckPath: /health
     envVars:

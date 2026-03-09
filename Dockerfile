@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
     libqpdf-dev \
+    libreoffice-nogui \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -18,7 +19,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY main.py remediation.py gemini_verify.py ./
+COPY main.py remediation.py gemini_verify.py convert.py ./
 
 # Create working directories for uploads and output
 RUN mkdir -p /app/uploads /app/output
