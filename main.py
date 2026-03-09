@@ -166,6 +166,7 @@ class LicenseUsageRequest(BaseModel):
     pdfs_completed: int = 0
     hostname: str | None = None
     filename: str | None = None
+    remediation_type: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +217,7 @@ async def license_validate(body: LicenseValidateRequest):
         "plan": tenant_info["plan_name"],
         "pages_included": tenant_info["pages_included"],
         "pages_remaining": tenant_info["pages_remaining"],
+        "features": tenant_info.get("features", {}),
     }
 
 
@@ -235,6 +237,11 @@ async def license_usage(
     # Enforce tenant access before recording usage
     enforce_tenant_access(auth_ctx["tenant_id"], required_scope="api_access")
 
+    # Determine remediation type and rate
+    rem_type = body.remediation_type or "standard"
+    default_rates = {"standard": 25, "ai_verified": 35, "human_review": 400}
+    rate = default_rates.get(rem_type, 25)
+
     usage = record_usage(
         tenant_id=auth_ctx["tenant_id"],
         api_key_id=auth_ctx["api_key_id"],
@@ -242,6 +249,8 @@ async def license_usage(
         pages=body.pages_processed,
         filename=body.filename or f"batch:{body.pdfs_completed} PDFs",
         doc_format="pdf",
+        remediation_type=rem_type,
+        rate_cents=rate,
     )
     update_last_used(auth_ctx["api_key_id"])
 
@@ -326,6 +335,7 @@ async def analyze(
         pages=page_count,
         filename=original_filename,
         doc_format=original_ext.lstrip("."),
+        rate_cents=0,
     )
 
     headers: dict[str, str] = {}
@@ -418,6 +428,9 @@ async def remediate(
     tenant_id = auth_ctx["tenant_id"] if auth_ctx else DEMO_TENANT_ID
     api_key_id = auth_ctx["api_key_id"] if auth_ctx else None
 
+    rem_type = "ai_verified" if verify else "standard"
+    rem_rate = 35 if verify else 25
+
     usage = record_usage(
         tenant_id=tenant_id,
         api_key_id=api_key_id,
@@ -425,6 +438,8 @@ async def remediate(
         pages=page_count,
         filename=original_filename,
         doc_format=original_ext.lstrip("."),
+        remediation_type=rem_type,
+        rate_cents=rem_rate,
     )
 
     headers: dict[str, str] = {}

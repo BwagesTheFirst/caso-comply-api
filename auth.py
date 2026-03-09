@@ -132,6 +132,8 @@ def record_usage(
     pages: int,
     filename: str | None = None,
     doc_format: str | None = None,
+    remediation_type: str | None = None,
+    rate_cents: int | None = None,
 ) -> dict:
     """
     Insert a usage record and return a summary for the current billing period.
@@ -143,6 +145,8 @@ def record_usage(
         pages:      Number of pages processed.
         filename:   Original filename (optional).
         doc_format: File format, e.g. "pdf", "docx" (optional).
+        remediation_type: "standard", "ai_verified", or "human_review" (optional).
+        rate_cents: Per-page rate in cents applied to this usage (optional).
 
     Returns:
         dict with pages_used (this period) and pages_included (from plan).
@@ -162,6 +166,11 @@ def record_usage(
     }
     if api_key_id is not None:
         record["api_key_id"] = api_key_id
+    if remediation_type is not None:
+        record["remediation_type"] = remediation_type
+    if rate_cents is not None:
+        record["rate_cents_applied"] = rate_cents
+        record["cost_cents"] = pages * rate_cents
 
     try:
         sb.table("usage_records").insert(record).execute()
