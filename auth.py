@@ -155,11 +155,10 @@ def record_usage(
     record = {
         "tenant_id": tenant_id,
         "action": action,
-        "pages": pages,
-        "filename": filename,
-        "doc_format": doc_format,
-        "billing_period_start": billing_period_start.isoformat(),
-        "created_at": now.isoformat(),
+        "pages_consumed": pages,
+        "document_filename": filename,
+        "document_format": doc_format,
+        "billing_period_start": billing_period_start.date().isoformat(),
     }
     if api_key_id is not None:
         record["api_key_id"] = api_key_id
@@ -175,12 +174,12 @@ def record_usage(
     try:
         agg = (
             sb.table("usage_records")
-            .select("pages")
+            .select("pages_consumed")
             .eq("tenant_id", tenant_id)
-            .gte("billing_period_start", billing_period_start.isoformat())
+            .gte("billing_period_start", billing_period_start.date().isoformat())
             .execute()
         )
-        pages_used = sum(row.get("pages", 0) for row in (agg.data or []))
+        pages_used = sum(row.get("pages_consumed", 0) for row in (agg.data or []))
     except Exception:
         logger.exception("Failed to aggregate usage for tenant %s", tenant_id)
         pages_used = -1
@@ -190,13 +189,17 @@ def record_usage(
     try:
         plan = (
             sb.table("tenants")
-            .select("pages_included")
+            .select("subscription_plans(pages_included)")
             .eq("id", tenant_id)
             .limit(1)
             .execute()
         )
         if plan.data:
-            pages_included = plan.data[0].get("pages_included", -1)
+            sp = plan.data[0].get("subscription_plans")
+            if isinstance(sp, dict):
+                pages_included = sp.get("pages_included", -1)
+            elif isinstance(sp, list) and sp:
+                pages_included = sp[0].get("pages_included", -1)
     except Exception:
         logger.exception("Failed to look up plan for tenant %s", tenant_id)
 
@@ -326,12 +329,12 @@ def enforce_tenant_access(tenant_id: str, required_scope: str | None = None) -> 
     try:
         agg = (
             sb.table("usage_records")
-            .select("pages")
+            .select("pages_consumed")
             .eq("tenant_id", tenant_id)
-            .gte("billing_period_start", billing_period_start.isoformat())
+            .gte("billing_period_start", billing_period_start.date().isoformat())
             .execute()
         )
-        pages_used = sum(row.get("pages", 0) for row in (agg.data or []))
+        pages_used = sum(row.get("pages_consumed", 0) for row in (agg.data or []))
     except Exception:
         logger.exception("Failed to aggregate usage for tenant %s", tenant_id)
 
