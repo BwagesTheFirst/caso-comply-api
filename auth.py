@@ -251,7 +251,9 @@ def enforce_tenant_access(tenant_id: str, required_scope: str | None = None) -> 
             sb.table("tenants")
             .select(
                 "id, name, status, trial_ends_at, plan_id, "
-                "subscription_plans(id, name, pages_included, features, overage_rate_cents)"
+                "subscription_plans(id, name, pages_included, features, overage_rate_cents, "
+                "standard_rate_cents, ai_verified_rate_cents, human_review_rate_cents, "
+                "review_score_threshold)"
             )
             .eq("id", tenant_id)
             .limit(1)
@@ -327,10 +329,7 @@ def enforce_tenant_access(tenant_id: str, required_scope: str | None = None) -> 
             ),
         )
 
-    # ---- 5. Check usage limits ----
-    pages_included = plan.get("pages_included", 0)
-    overage_rate_cents = plan.get("overage_rate_cents", 0)
-
+    # ---- 5. Aggregate current usage (for reporting, not enforcement) ----
     now = datetime.now(timezone.utc)
     billing_period_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
@@ -347,37 +346,13 @@ def enforce_tenant_access(tenant_id: str, required_scope: str | None = None) -> 
     except Exception:
         logger.exception("Failed to aggregate usage for tenant %s", tenant_id)
 
-    pages_remaining = max(0, pages_included - pages_used)
-
-    if pages_used >= pages_included and pages_included > 0:
-        if not overage_rate_cents:
-            raise HTTPException(
-                status_code=429,
-                detail=(
-                    f"Plan limit exceeded. You have used {pages_used:,} of "
-                    f"{pages_included:,} pages included in your "
-                    f"{plan.get('name', '')} plan this billing period. "
-                    "Upgrade your plan or wait until the next billing cycle. "
-                    "Visit https://app.casocomply.com/billing to manage your subscription."
-                ),
-            )
-        else:
-            logger.warning(
-                "Tenant %s exceeded included pages (%d/%d) -- overage billing applies at %d cents/page",
-                tenant_id,
-                pages_used,
-                pages_included,
-                overage_rate_cents,
-            )
-
     return {
         "tenant_id": tenant_id,
         "org_name": tenant.get("name", ""),
         "status": status,
         "plan_name": plan.get("name", "Unknown"),
         "plan_id": plan.get("id"),
-        "pages_included": pages_included,
         "pages_used": pages_used,
-        "pages_remaining": pages_remaining,
         "features": features,
+        "plan": plan,
     }

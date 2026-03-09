@@ -14,9 +14,10 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from pydantic import BaseModel
+from supabase import create_client
 
 from auth import validate_api_key, record_usage, update_last_used, enforce_tenant_access
 from convert import is_convertible, convert_to_pdf
@@ -66,6 +67,16 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _get_supabase_admin():
+    """Return a Supabase client using service role key for Storage access."""
+    import os
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    if not url or not key:
+        raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY required")
+    return create_client(url, key)
 
 
 def _save_upload(upload: UploadFile) -> tuple[str, Path]:
@@ -169,6 +180,11 @@ class LicenseUsageRequest(BaseModel):
     remediation_type: str | None = None
 
 
+class ReviewSubmitResponse(BaseModel):
+    review_id: str
+    status: str
+
+
 # ---------------------------------------------------------------------------
 # License endpoints (used by Docker agent)
 # ---------------------------------------------------------------------------
@@ -211,13 +227,17 @@ async def license_validate(body: LicenseValidateRequest):
         body.hostname or "unknown",
     )
 
+    # Get the plan dict from enforce_tenant_access for threshold
+    plan = tenant_info.get("plan", {})
+    threshold = plan.get("review_score_threshold", 70) if isinstance(plan, dict) else 70
+
     return {
         "valid": True,
         "org": tenant_info["org_name"],
         "plan": tenant_info["plan_name"],
-        "pages_included": tenant_info["pages_included"],
-        "pages_remaining": tenant_info["pages_remaining"],
+        "pages_used": tenant_info["pages_used"],
         "features": tenant_info.get("features", {}),
+        "review_score_threshold": threshold,
     }
 
 
@@ -521,3 +541,208 @@ async def download(file_id: str):
         media_type="application/pdf",
         filename=target.name,
     )
+
+
+# ---------------------------------------------------------------------------
+# Human Review endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/review/submit")
+async def review_submit(
+    file: UploadFile = File(...),
+    filename: str = Query(..., description="Original filename"),
+    original_path: str = Query(..., description="Path on customer's machine"),
+    output_path: str = Query(..., description="Where the AI-remediated file was written"),
+    ai_score: int = Query(..., description="Score after AI remediation"),
+    page_count: int = Query(0, description="Number of pages"),
+    authorization: str | None = Header(None),
+):
+    """Docker agent submits a low-scoring file for human review."""
+    auth_ctx = validate_api_key(authorization or "")
+    enforce_tenant_access(auth_ctx["tenant_id"], required_scope="api_access")
+
+    sb = _get_supabase_admin()
+
+    insert_result = sb.table("review_queue").insert({
+        "tenant_id": auth_ctx["tenant_id"],
+        "filename": filename,
+        "original_path": original_path,
+        "output_path": output_path,
+        "ai_score": ai_score,
+        "page_count": page_count,
+        "status": "pending",
+        "storage_path": "",
+    }).execute()
+
+    if not insert_result.data:
+        raise HTTPException(status_code=500, detail="Failed to create review queue entry")
+
+    review_id = insert_result.data[0]["id"]
+
+    storage_path = f"{auth_ctx['tenant_id']}/{review_id}/original.pdf"
+    file_bytes = await file.read()
+
+    sb.storage.from_("review-files").upload(
+        path=storage_path,
+        file=file_bytes,
+        file_options={"content-type": "application/pdf"},
+    )
+
+    sb.table("review_queue").update({
+        "storage_path": storage_path,
+    }).eq("id", review_id).execute()
+
+    logger.info(
+        "Review submitted: %s (score %d) for tenant %s → %s",
+        filename, ai_score, auth_ctx["tenant_id"], review_id,
+    )
+
+    return {"review_id": review_id, "status": "pending"}
+
+
+@app.get("/api/review/queue")
+async def review_queue_list(
+    status: str | None = Query(None, description="Filter by status"),
+    authorization: str | None = Header(None),
+):
+    """List review queue items. Admin only."""
+    sb = _get_supabase_admin()
+    query = sb.table("review_queue").select(
+        "*, tenants(name)"
+    ).order("created_at", desc=False)
+    if status:
+        query = query.eq("status", status)
+    result = query.execute()
+    return {"reviews": result.data or []}
+
+
+@app.get("/api/review/pending")
+async def review_pending(
+    authorization: str | None = Header(None),
+):
+    """Returns completed reviews for this tenant (ready for agent to download)."""
+    auth_ctx = validate_api_key(authorization or "")
+    sb = _get_supabase_admin()
+    result = sb.table("review_queue").select("*").eq(
+        "tenant_id", auth_ctx["tenant_id"]
+    ).eq("status", "completed").execute()
+    return {"reviews": result.data or []}
+
+
+@app.get("/api/review/{review_id}/download")
+async def review_download_original(review_id: str):
+    """Download the original (low-scoring) file for review."""
+    sb = _get_supabase_admin()
+    result = sb.table("review_queue").select("*").eq("id", review_id).limit(1).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Review not found")
+    review = result.data[0]
+    file_bytes = sb.storage.from_("review-files").download(review["storage_path"])
+    return Response(
+        content=file_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{review["filename"]}"'},
+    )
+
+
+@app.post("/api/review/{review_id}/start")
+async def review_start(review_id: str):
+    """Mark a review as in_review."""
+    sb = _get_supabase_admin()
+    result = sb.table("review_queue").update({
+        "status": "in_review",
+    }).eq("id", review_id).eq("status", "pending").execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Review not found or not in pending status")
+    return {"status": "in_review"}
+
+
+@app.post("/api/review/{review_id}/release")
+async def review_release(review_id: str):
+    """Release a review back to pending."""
+    sb = _get_supabase_admin()
+    result = sb.table("review_queue").update({
+        "status": "pending",
+    }).eq("id", review_id).eq("status", "in_review").execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Review not found or not in_review status")
+    return {"status": "pending"}
+
+
+@app.post("/api/review/{review_id}/complete")
+async def review_complete(
+    review_id: str,
+    file: UploadFile = File(...),
+    notes: str = Query("", description="Optional reviewer notes"),
+):
+    """Upload the corrected file and mark the review as completed."""
+    sb = _get_supabase_admin()
+    result = sb.table("review_queue").select("*").eq("id", review_id).limit(1).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Review not found")
+    review = result.data[0]
+    if review["status"] not in ("pending", "in_review"):
+        raise HTTPException(status_code=400, detail=f"Cannot complete review in '{review['status']}' status")
+
+    corrected_path = f"{review['tenant_id']}/{review_id}/corrected.pdf"
+    file_bytes = await file.read()
+    sb.storage.from_("review-files").upload(
+        path=corrected_path,
+        file=file_bytes,
+        file_options={"content-type": "application/pdf"},
+    )
+
+    from datetime import datetime, timezone
+    sb.table("review_queue").update({
+        "status": "completed",
+        "corrected_path": corrected_path,
+        "reviewer_notes": notes or None,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", review_id).execute()
+
+    logger.info("Review %s completed for %s", review_id, review["filename"])
+    return {"status": "completed", "review_id": review_id}
+
+
+@app.get("/api/review/{review_id}/download-corrected")
+async def review_download_corrected(
+    review_id: str,
+    authorization: str | None = Header(None),
+):
+    """Download the corrected file. Called by the Docker agent."""
+    auth_ctx = validate_api_key(authorization or "")
+    sb = _get_supabase_admin()
+    result = sb.table("review_queue").select("*").eq("id", review_id).limit(1).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Review not found")
+    review = result.data[0]
+    if review["tenant_id"] != auth_ctx["tenant_id"]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    if not review.get("corrected_path"):
+        raise HTTPException(status_code=404, detail="Corrected file not yet uploaded")
+    file_bytes = sb.storage.from_("review-files").download(review["corrected_path"])
+    return Response(
+        content=file_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{review["filename"]}"'},
+    )
+
+
+@app.post("/api/review/{review_id}/delivered")
+async def review_delivered(
+    review_id: str,
+    authorization: str | None = Header(None),
+):
+    """Agent confirms it has downloaded and placed the corrected file."""
+    auth_ctx = validate_api_key(authorization or "")
+    sb = _get_supabase_admin()
+    from datetime import datetime, timezone
+    result = sb.table("review_queue").update({
+        "status": "delivered",
+        "delivered_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", review_id).eq("tenant_id", auth_ctx["tenant_id"]).eq("status", "completed").execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Review not found or not in completed status")
+    logger.info("Review %s delivered to agent for tenant %s", review_id, auth_ctx["tenant_id"])
+    return {"status": "delivered"}
