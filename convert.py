@@ -9,7 +9,9 @@ PDF analysis and remediation pipeline.
 from __future__ import annotations
 
 import logging
+import shutil
 import subprocess
+import uuid
 from pathlib import Path
 
 logger = logging.getLogger("caso-comply-api.convert")
@@ -41,10 +43,16 @@ def convert_to_pdf(input_path: Path, output_dir: Path) -> Path:
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Each conversion gets its own LibreOffice user profile to avoid
+    # concurrency conflicts when multiple requests run in parallel.
+    profile_id = uuid.uuid4().hex
+    profile_dir = Path(f"/tmp/lo_profile_{profile_id}")
+
     cmd = [
         "libreoffice",
         "--headless",
         "--norestore",
+        f"-env:UserInstallation=file://{profile_dir}",
         "--convert-to", "pdf",
         "--outdir", str(output_dir),
         str(input_path),
@@ -64,6 +72,12 @@ def convert_to_pdf(input_path: Path, output_dir: Path) -> Path:
             f"LibreOffice conversion timed out after {CONVERSION_TIMEOUT}s "
             f"for {input_path.name}"
         ) from exc
+    finally:
+        # Clean up the temporary user profile directory
+        try:
+            shutil.rmtree(profile_dir, ignore_errors=True)
+        except Exception:
+            logger.warning("Failed to clean up LO profile dir %s", profile_dir)
 
     if result.returncode != 0:
         logger.error(

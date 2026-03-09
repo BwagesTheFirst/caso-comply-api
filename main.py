@@ -12,10 +12,11 @@ import shutil
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
+from auth import validate_api_key, record_usage, update_last_used
 from convert import is_convertible, convert_to_pdf
 from remediation import analyze_pdf, remediate_pdf_async
 
@@ -149,12 +150,21 @@ async def root():
 
 
 @app.post("/api/analyze")
-async def analyze(file: UploadFile = File(...)):
+async def analyze(
+    file: UploadFile = File(...),
+    authorization: str | None = Header(None),
+):
     """
     Upload a PDF and receive an accessibility analysis.
 
     Returns score, grade, structural checks, content summary, and issues.
+    Optionally authenticate with a Bearer token for usage tracking.
     """
+    # Optional API key authentication
+    auth_ctx: dict | None = None
+    if authorization:
+        auth_ctx = validate_api_key(authorization)
+
     file_id, path = _save_upload(file)
     original_filename = file.filename or ""
     pdf_path, was_converted = _ensure_pdf(file_id, path, original_filename)
@@ -166,8 +176,9 @@ async def analyze(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}") from exc
 
     original_ext = Path(original_filename).suffix.lower() if original_filename else ".pdf"
+    page_count = result["content"].get("pages_analyzed", 0)
 
-    return {
+    body = {
         "file_id": file_id,
         "filename": file.filename,
         "original_format": original_ext.lstrip("."),
@@ -182,18 +193,46 @@ async def analyze(file: UploadFile = File(...)):
         "tables": result["tables"],
     }
 
+    # Track usage & build response headers when authenticated
+    headers: dict[str, str] = {}
+    if auth_ctx:
+        usage = record_usage(
+            tenant_id=auth_ctx["tenant_id"],
+            api_key_id=auth_ctx["api_key_id"],
+            action="analyze",
+            pages=page_count,
+            filename=original_filename,
+            doc_format=original_ext.lstrip("."),
+        )
+        update_last_used(auth_ctx["api_key_id"])
+        headers["X-CASO-Pages-Used"] = str(usage["pages_used"])
+        headers["X-CASO-Pages-Remaining"] = str(
+            max(0, usage["pages_included"] - usage["pages_used"])
+            if usage["pages_included"] >= 0 and usage["pages_used"] >= 0
+            else -1
+        )
+
+    return JSONResponse(content=body, headers=headers)
+
 
 @app.post("/api/remediate")
 async def remediate(
     file: UploadFile = File(...),
     verify: bool = Query(True, description="Run Gemini AI verification on tag assignments"),
+    authorization: str | None = Header(None),
 ):
     """
     Upload a PDF, remediate it, and receive before/after comparison
     plus a download URL for the remediated file.
 
     Set ?verify=false to skip the Gemini AI verification step.
+    Optionally authenticate with a Bearer token for usage tracking.
     """
+    # Optional API key authentication
+    auth_ctx: dict | None = None
+    if authorization:
+        auth_ctx = validate_api_key(authorization)
+
     file_id, path = _save_upload(file)
     original_filename = file.filename or ""
     pdf_path, was_converted = _ensure_pdf(file_id, path, original_filename)
@@ -209,7 +248,21 @@ async def remediate(
 
     original_ext = Path(original_filename).suffix.lower() if original_filename else ".pdf"
 
-    response = {
+    # Determine page count from the analysis result
+    page_count = 0
+    if "before" in result and "structure" in result["before"]:
+        # Try to get page count from structure or content
+        page_count = result["before"].get("content", {}).get("pages_analyzed", 0)
+    if page_count == 0 and "after" in result and "structure" in result["after"]:
+        page_count = result["after"].get("content", {}).get("pages_analyzed", 0)
+    # Fallback: count from blocks_tagged
+    if page_count == 0:
+        page_count = max(
+            (b.get("page", 0) for b in result.get("tag_assignments", []) if isinstance(b, dict)),
+            default=1,
+        )
+
+    body = {
         "file_id": file_id,
         "filename": file.filename,
         "original_format": original_ext.lstrip("."),
@@ -231,9 +284,28 @@ async def remediate(
 
     # Include Gemini verification details when available
     if "verification" in result:
-        response["verification"] = result["verification"]
+        body["verification"] = result["verification"]
 
-    return response
+    # Track usage & build response headers when authenticated
+    headers: dict[str, str] = {}
+    if auth_ctx:
+        usage = record_usage(
+            tenant_id=auth_ctx["tenant_id"],
+            api_key_id=auth_ctx["api_key_id"],
+            action="remediate",
+            pages=page_count,
+            filename=original_filename,
+            doc_format=original_ext.lstrip("."),
+        )
+        update_last_used(auth_ctx["api_key_id"])
+        headers["X-CASO-Pages-Used"] = str(usage["pages_used"])
+        headers["X-CASO-Pages-Remaining"] = str(
+            max(0, usage["pages_included"] - usage["pages_used"])
+            if usage["pages_included"] >= 0 and usage["pages_used"] >= 0
+            else -1
+        )
+
+    return JSONResponse(content=body, headers=headers)
 
 
 @app.post("/api/verify/{file_id}")
