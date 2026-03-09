@@ -165,6 +165,7 @@ class LicenseUsageRequest(BaseModel):
     pages_processed: int
     pdfs_completed: int = 0
     hostname: str | None = None
+    filename: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +240,7 @@ async def license_usage(
         api_key_id=auth_ctx["api_key_id"],
         action="remediate",
         pages=body.pages_processed,
-        filename=f"batch:{body.pdfs_completed} PDFs",
+        filename=body.filename or f"batch:{body.pdfs_completed} PDFs",
         doc_format="pdf",
     )
     update_last_used(auth_ctx["api_key_id"])
