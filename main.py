@@ -16,7 +16,9 @@ from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
-from auth import validate_api_key, record_usage, update_last_used
+from pydantic import BaseModel
+
+from auth import validate_api_key, record_usage, update_last_used, enforce_tenant_access
 from convert import is_convertible, convert_to_pdf
 from remediation import analyze_pdf, remediate_pdf_async
 
@@ -149,6 +151,123 @@ async def root():
     }
 
 
+# ---------------------------------------------------------------------------
+# Pydantic models for license endpoints
+# ---------------------------------------------------------------------------
+
+
+class LicenseValidateRequest(BaseModel):
+    license_key: str
+    hostname: str | None = None
+
+
+class LicenseUsageRequest(BaseModel):
+    pages_processed: int
+    pdfs_completed: int = 0
+    hostname: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# License endpoints (used by Docker agent)
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/license/validate")
+async def license_validate(body: LicenseValidateRequest):
+    """
+    Validate a license key for a Docker agent on startup.
+
+    The agent sends its license key and hostname; this endpoint checks the
+    key is valid, the account is active, and the plan allows API access.
+    """
+    # Build a fake Authorization header so we can reuse validate_api_key
+    authorization = f"Bearer {body.license_key}"
+
+    try:
+        auth_ctx = validate_api_key(authorization)
+    except HTTPException as exc:
+        return JSONResponse(
+            status_code=200,
+            content={"valid": False, "reason": exc.detail},
+        )
+
+    # Run full tenant enforcement (status, trial, feature check)
+    try:
+        tenant_info = enforce_tenant_access(
+            auth_ctx["tenant_id"], required_scope="api_access"
+        )
+    except HTTPException as exc:
+        return JSONResponse(
+            status_code=200,
+            content={"valid": False, "reason": exc.detail},
+        )
+
+    logger.info(
+        "License validated for tenant %s (%s) from host %s",
+        auth_ctx["tenant_id"],
+        tenant_info["org_name"],
+        body.hostname or "unknown",
+    )
+
+    return {
+        "valid": True,
+        "org": tenant_info["org_name"],
+        "plan": tenant_info["plan_name"],
+        "pages_included": tenant_info["pages_included"],
+        "pages_remaining": tenant_info["pages_remaining"],
+    }
+
+
+@app.post("/api/license/usage")
+async def license_usage(
+    body: LicenseUsageRequest,
+    authorization: str | None = Header(None),
+):
+    """
+    Report batch usage from a Docker agent.
+
+    The agent sends the number of pages/PDFs processed; this endpoint
+    records usage and returns the updated totals.
+    """
+    auth_ctx = validate_api_key(authorization or "")
+
+    # Enforce tenant access before recording usage
+    enforce_tenant_access(auth_ctx["tenant_id"], required_scope="api_access")
+
+    usage = record_usage(
+        tenant_id=auth_ctx["tenant_id"],
+        api_key_id=auth_ctx["api_key_id"],
+        action="remediate",
+        pages=body.pages_processed,
+        filename=f"batch:{body.pdfs_completed} PDFs",
+        doc_format="pdf",
+    )
+    update_last_used(auth_ctx["api_key_id"])
+
+    pages_remaining = max(
+        0, usage["pages_included"] - usage["pages_used"]
+    ) if usage["pages_included"] >= 0 and usage["pages_used"] >= 0 else -1
+
+    logger.info(
+        "Batch usage recorded: %d pages from tenant %s (host: %s). Total: %d/%d",
+        body.pages_processed,
+        auth_ctx["tenant_id"],
+        body.hostname or "unknown",
+        usage["pages_used"],
+        usage["pages_included"],
+    )
+
+    return {
+        "pages_used": usage["pages_used"],
+        "pages_remaining": pages_remaining,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Core endpoints
+# ---------------------------------------------------------------------------
+
+
 @app.post("/api/analyze")
 async def analyze(
     file: UploadFile = File(...),
@@ -160,10 +279,11 @@ async def analyze(
     Returns score, grade, structural checks, content summary, and issues.
     Optionally authenticate with a Bearer token for usage tracking.
     """
-    # Optional API key authentication
+    # Optional API key authentication + tenant enforcement
     auth_ctx: dict | None = None
     if authorization:
         auth_ctx = validate_api_key(authorization)
+        enforce_tenant_access(auth_ctx["tenant_id"])
 
     file_id, path = _save_upload(file)
     original_filename = file.filename or ""
@@ -228,10 +348,11 @@ async def remediate(
     Set ?verify=false to skip the Gemini AI verification step.
     Optionally authenticate with a Bearer token for usage tracking.
     """
-    # Optional API key authentication
+    # Optional API key authentication + tenant enforcement
     auth_ctx: dict | None = None
     if authorization:
         auth_ctx = validate_api_key(authorization)
+        enforce_tenant_access(auth_ctx["tenant_id"])
 
     file_id, path = _save_upload(file)
     original_filename = file.filename or ""
