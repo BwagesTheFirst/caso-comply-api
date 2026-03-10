@@ -133,6 +133,24 @@ def extract_content(pdf_path: str, max_pages: int = 50) -> dict:
                 })
                 content["total_images"] += 1
 
+        # Also detect XObject images that don't appear as block type 1
+        xobj_images = page.get_images(full=True)
+        if xobj_images and not page_data["images"]:
+            # No inline image blocks found, but XObject images exist
+            for img_info in xobj_images:
+                # img_info: (xref, smask, width, height, bpc, colorspace, alt, name, filter)
+                img_width = img_info[2]
+                img_height = img_info[3]
+                # Use page dimensions as bbox estimate since XObjects lack position info
+                # Skip tiny images (likely artifacts/spacers)
+                if img_width > 50 and img_height > 50:
+                    page_data["images"].append({
+                        "bbox": [0, 0, float(page.rect.width), float(page.rect.height)],
+                        "width": img_width,
+                        "height": img_height,
+                    })
+                    content["total_images"] += 1
+
         content["pages"].append(page_data)
 
     doc.close()
