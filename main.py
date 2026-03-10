@@ -21,7 +21,7 @@ from supabase import create_client
 
 from auth import validate_api_key, record_usage, update_last_used, enforce_tenant_access
 from convert import is_convertible, convert_to_pdf
-from remediation import analyze_pdf, remediate_pdf_async
+from remediation import analyze_pdf, apply_tag_edits, remediate_pdf_async
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -157,6 +157,7 @@ async def root():
             "POST /api/analyze",
             "POST /api/remediate",
             "POST /api/verify/{file_id}",
+            "POST /api/apply-edits",
             "GET  /api/download/{file_id}",
         ],
     }
@@ -178,6 +179,21 @@ class LicenseUsageRequest(BaseModel):
     hostname: str | None = None
     filename: str | None = None
     remediation_type: str | None = None
+
+
+class TagEdit(BaseModel):
+    type: str
+    text: str = ""
+    page: int
+    mcid: int
+    font_size: float = 0.0
+    bbox: list[float] = []
+    alt_text: str | None = None
+
+
+class ApplyEditsRequest(BaseModel):
+    file_id: str
+    edits: list[TagEdit]
 
 
 class ReviewSubmitResponse(BaseModel):
@@ -520,6 +536,90 @@ async def verify(file_id: str):
         response["verification"] = result["verification"]
 
     return response
+
+
+@app.post("/api/apply-edits")
+async def apply_edits(
+    body: ApplyEditsRequest,
+    authorization: str | None = Header(None),
+):
+    """
+    Apply edited tag assignments to a previously remediated PDF.
+
+    Accepts updated tag types (and optional alt text for Figure tags) from the
+    web UI, rebuilds the PDF structure tree with the new assignments, re-scores
+    the document, and returns a download URL with fresh compliance results.
+    """
+    file_id = body.file_id
+
+    # Validate file_id format
+    if not file_id.isalnum() or len(file_id) > 24:
+        raise HTTPException(status_code=400, detail="Invalid file ID")
+
+    # Optional API key authentication + tenant enforcement
+    auth_ctx: dict | None = None
+    if authorization:
+        auth_ctx = validate_api_key(authorization)
+        enforce_tenant_access(auth_ctx["tenant_id"])
+
+    # Find the previously remediated PDF
+    remediated_path = OUTPUT_DIR / f"{file_id}_remediated.pdf"
+    if not remediated_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Remediated file not found -- run remediation first",
+        )
+
+    # Convert Pydantic models to dicts for the remediation engine
+    tag_assignments = [edit.model_dump() for edit in body.edits]
+
+    # Validate tag types
+    valid_types = {"H1", "H2", "H3", "H4", "H5", "H6", "P", "Figure",
+                   "Table", "TR", "TD", "TH", "L", "LI", "Span", "Link"}
+    for tag in tag_assignments:
+        if tag["type"] not in valid_types:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid tag type '{tag['type']}'. "
+                       f"Must be one of: {', '.join(sorted(valid_types))}",
+            )
+
+    # Apply edits -- overwrites the existing remediated file in place
+    output_path = str(remediated_path)
+    try:
+        after_analysis = apply_tag_edits(
+            pdf_path=output_path,
+            output_path=output_path,
+            tag_assignments=tag_assignments,
+        )
+    except Exception as exc:
+        logger.exception("apply-edits failed for file_id=%s", file_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to apply edits: {exc}",
+        ) from exc
+
+    # Build response tag_assignments with truncated text
+    response_tags = [
+        {
+            "type": t["type"],
+            "page": t["page"],
+            "mcid": t["mcid"],
+            "text": t.get("text", "")[:120],
+            "font_size": t.get("font_size", 0),
+            "bbox": t.get("bbox", []),
+        }
+        for t in tag_assignments
+    ]
+
+    return {
+        "download_url": f"/api/download/{file_id}",
+        "after": {
+            "score": after_analysis["score"],
+            "structure": after_analysis["structure"],
+        },
+        "tag_assignments": response_tags,
+    }
 
 
 @app.get("/api/download/{file_id}")

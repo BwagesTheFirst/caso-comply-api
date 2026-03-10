@@ -20,7 +20,6 @@ import fitz  # PyMuPDF
 
 logger = logging.getLogger(__name__)
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 MODEL_ID = "gemini-2.5-flash"
 
 # ── Structured output schema sent to Gemini ──────────────────────────────
@@ -195,13 +194,14 @@ async def _call_gemini(
     content: dict,
 ) -> dict:
     """Internal: actually call the Gemini API."""
-    if not GEMINI_API_KEY:
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
         raise RuntimeError("GEMINI_API_KEY not set")
 
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=api_key)
 
     # ── Render pages ─────────────────────────────────────────────────
     logger.info("Rendering PDF pages as images for Gemini verification")

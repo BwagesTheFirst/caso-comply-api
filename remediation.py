@@ -710,6 +710,90 @@ async def remediate_pdf_async(
     return result
 
 
+def apply_tag_edits(
+    pdf_path: str,
+    output_path: str,
+    tag_assignments: list[dict],
+) -> dict:
+    """
+    Apply edited tag assignments to an existing PDF.
+
+    Opens the PDF with pikepdf, removes any existing structure tree,
+    rebuilds it with the new tag assignments (using _build_structure_tree
+    and _inject_marked_content), and saves to output_path.
+
+    Args:
+        pdf_path: Path to the source PDF (typically a previously remediated file).
+        output_path: Where to save the re-tagged PDF.
+        tag_assignments: List of dicts, each with keys:
+            type (str), text (str), page (int), mcid (int),
+            font_size (float), bbox ([x0,y0,x1,y1]).
+            Figure tags may also include alt_text (str).
+
+    Returns:
+        A dict with the analysis result of the newly saved PDF.
+    """
+    logger.info("Applying %d tag edits to %s", len(tag_assignments), pdf_path)
+
+    # Re-assign MCIDs sequentially per page to ensure consistency
+    mcid_counters: dict[int, int] = defaultdict(int)
+    for tag in tag_assignments:
+        tag["mcid"] = mcid_counters[tag["page"]]
+        mcid_counters[tag["page"]] += 1
+
+    # Derive title from first H1
+    title = "Untitled Document"
+    for tag in tag_assignments:
+        if tag["type"] == "H1":
+            title = tag.get("text", "")[:256]
+            break
+
+    pdf = pikepdf.open(pdf_path)
+
+    # Remove existing structure tree so we can rebuild cleanly
+    if "/StructTreeRoot" in pdf.Root:
+        del pdf.Root[Name("/StructTreeRoot")]
+    if "/MarkInfo" in pdf.Root:
+        del pdf.Root[Name("/MarkInfo")]
+
+    # Clear existing StructParents and marked content from pages
+    for page in pdf.pages:
+        if "/StructParents" in page:
+            del page[Name("/StructParents")]
+
+    # Set metadata and rebuild structure
+    _add_metadata(pdf, title)
+    _build_structure_tree(pdf, tag_assignments)
+
+    # Write /Alt on Figure StructElems that have alt_text provided
+    # We do this after _build_structure_tree so we can patch the elements
+    struct_tree = pdf.Root.get("/StructTreeRoot")
+    if struct_tree:
+        figures = _walk_struct_elems(struct_tree, "Figure")
+        # Match figures to tag assignments in order
+        figure_tags = [t for t in tag_assignments if t["type"] == "Figure"]
+        for fig_elem, fig_tag in zip(figures, figure_tags):
+            if fig_tag.get("alt_text"):
+                fig_elem[Name("/Alt")] = String(fig_tag["alt_text"])
+
+    # Inject marked content per page
+    pages_tags: dict[int, list[dict]] = defaultdict(list)
+    for tag in tag_assignments:
+        pages_tags[tag["page"]].append(tag)
+    for page_num, ptags in pages_tags.items():
+        ptags.sort(key=lambda t: t["mcid"])
+        _inject_marked_content(pdf, page_num, ptags)
+
+    pdf.save(output_path)
+    pdf.close()
+
+    logger.info("Saved edited PDF: %s", output_path)
+
+    # Re-analyze the output
+    after_analysis = analyze_pdf(output_path)
+    return after_analysis
+
+
 def remediate_pdf(
     file_path: str,
     output_path: str | None = None,
