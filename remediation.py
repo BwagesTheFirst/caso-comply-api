@@ -417,7 +417,7 @@ def _build_structure_tree(pdf: pikepdf.Pdf, tag_assignments: list[dict], alt_tex
         }))
         # Inject /Alt for Figure tags
         if tag["type"] == "Figure" and alt_texts:
-            page_key = str(tag["page"])
+            page_key = tag["page"]  # int key to match Gemini's output
             page_alts = alt_texts.get(page_key, [])
             fig_idx = figure_idx_per_page[tag["page"]]
             if fig_idx < len(page_alts):

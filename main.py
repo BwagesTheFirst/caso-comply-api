@@ -463,7 +463,7 @@ async def remediate(
         figure_idx_per_page: dict[int, int] = {}
         for tag in body["tag_assignments"]:
             if tag["type"] == "Figure":
-                page_key = str(tag["page"])
+                page_key = tag["page"]  # int key to match Gemini's output
                 page_alts = alt_texts.get(page_key, [])
                 fig_idx = figure_idx_per_page.get(tag["page"], 0)
                 if fig_idx < len(page_alts):
@@ -540,7 +540,7 @@ async def verify(file_id: str):
         figure_idx_per_page: dict[int, int] = {}
         for tag in tags:
             if tag["type"] == "Figure":
-                page_key = str(tag["page"])
+                page_key = tag["page"]  # int key to match Gemini's output
                 page_alts = alt_texts.get(page_key, [])
                 fig_idx = figure_idx_per_page.get(tag["page"], 0)
                 if fig_idx < len(page_alts):
