@@ -458,6 +458,19 @@ async def remediate(
     # Include Gemini verification details when available
     if "verification" in result:
         body["verification"] = result["verification"]
+        # Merge alt texts into Figure tags for frontend display
+        alt_texts = result["verification"].get("alt_texts", {})
+        figure_idx_per_page: dict[int, int] = {}
+        for tag in body["tag_assignments"]:
+            if tag["type"] == "Figure":
+                page_key = str(tag["page"])
+                page_alts = alt_texts.get(page_key, [])
+                fig_idx = figure_idx_per_page.get(tag["page"], 0)
+                if fig_idx < len(page_alts):
+                    desc = page_alts[fig_idx].get("description", "")
+                    if desc:
+                        tag["alt_text"] = desc
+                figure_idx_per_page[tag["page"]] = fig_idx + 1
 
     # Track usage -- always record, even for anonymous/demo requests
     DEMO_TENANT_ID = "00000000-0000-0000-0000-000000000000"
@@ -520,11 +533,27 @@ async def verify(file_id: str):
         logger.exception("Verification failed for %s", upload_path.name)
         raise HTTPException(status_code=500, detail=f"Verification failed: {exc}") from exc
 
+    # Merge Gemini alt texts into Figure tag assignments for frontend display
+    tags = result["tag_assignments"]
+    if "verification" in result:
+        alt_texts = result["verification"].get("alt_texts", {})
+        figure_idx_per_page: dict[int, int] = {}
+        for tag in tags:
+            if tag["type"] == "Figure":
+                page_key = str(tag["page"])
+                page_alts = alt_texts.get(page_key, [])
+                fig_idx = figure_idx_per_page.get(tag["page"], 0)
+                if fig_idx < len(page_alts):
+                    desc = page_alts[fig_idx].get("description", "")
+                    if desc:
+                        tag["alt_text"] = desc
+                figure_idx_per_page[tag["page"]] = fig_idx + 1
+
     response = {
         "file_id": file_id,
         "blocks_tagged": result["blocks_tagged"],
         "tag_summary": result.get("tag_summary", {}),
-        "tag_assignments": result["tag_assignments"],
+        "tag_assignments": tags,
         "page_dimensions": result.get("page_dimensions", []),
         "after": {
             "score": result["after"]["score"],
