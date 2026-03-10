@@ -383,9 +383,12 @@ def _add_metadata(pdf: pikepdf.Pdf, title: str, lang: str = "en-US"):
     })
 
 
-def _build_structure_tree(pdf: pikepdf.Pdf, tag_assignments: list[dict]):
+def _build_structure_tree(pdf: pikepdf.Pdf, tag_assignments: list[dict], alt_texts: dict | None = None):
     """Build StructTreeRoot with Document -> heading/paragraph elements."""
     struct_elems = []
+
+    # Track figure index per page for alt_text matching
+    figure_idx_per_page: dict[int, int] = defaultdict(int)
 
     for tag in tag_assignments:
         elem = pdf.make_indirect(Dictionary({
@@ -394,6 +397,19 @@ def _build_structure_tree(pdf: pikepdf.Pdf, tag_assignments: list[dict]):
             "/Pg": pdf.pages[tag["page"]].obj,
             "/K": tag["mcid"],
         }))
+        # Inject /Alt for Figure tags
+        if tag["type"] == "Figure" and alt_texts:
+            page_key = str(tag["page"])
+            page_alts = alt_texts.get(page_key, [])
+            fig_idx = figure_idx_per_page[tag["page"]]
+            if fig_idx < len(page_alts):
+                desc = page_alts[fig_idx].get("description", "")
+                if desc:
+                    elem[Name("/Alt")] = String(desc)
+            figure_idx_per_page[tag["page"]] += 1
+        # Also check inline alt_text from tag dict (from apply_tag_edits)
+        elif tag["type"] == "Figure" and tag.get("alt_text"):
+            elem[Name("/Alt")] = String(tag["alt_text"])
         struct_elems.append(elem)
 
     doc_elem = pdf.make_indirect(Dictionary({
@@ -642,6 +658,32 @@ async def remediate_pdf_async(
                 t["mcid"] = mcid_counters[t["page"]]
                 mcid_counters[t["page"]] += 1
 
+    # ── Create Figure tags for images ─────────────────────────────────
+    mcid_counters_fig: dict[int, int] = defaultdict(int)
+    for t in tag_assignments:
+        mcid_counters_fig[t["page"]] = max(
+            mcid_counters_fig[t["page"]], t["mcid"] + 1
+        )
+
+    for page_data in content["pages"]:
+        page_num = page_data["page"]
+        for img in page_data["images"]:
+            mcid = mcid_counters_fig[page_num]
+            mcid_counters_fig[page_num] += 1
+            tag_assignments.append({
+                "type": "Figure",
+                "page": page_num,
+                "mcid": mcid,
+                "text": "",
+                "bbox": img["bbox"],
+                "font_size": 0,
+            })
+
+    # Extract alt_texts from verification result
+    alt_texts: dict | None = None
+    if verification_info is not None:
+        alt_texts = verification_info.get("alt_texts")
+
     # Derive title from first H1
     title = "Untitled Document"
     for tag in tag_assignments:
@@ -656,7 +698,7 @@ async def remediate_pdf_async(
     pdf = pikepdf.open(file_path)
 
     _add_metadata(pdf, title)
-    _build_structure_tree(pdf, tag_assignments)
+    _build_structure_tree(pdf, tag_assignments, alt_texts=alt_texts)
 
     # Inject marked content per page
     pages_tags: dict[int, list[dict]] = defaultdict(list)
